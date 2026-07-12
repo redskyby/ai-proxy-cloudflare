@@ -1,6 +1,15 @@
-# Gemini API Proxy via Cloudflare Workers for OpenCode
+# ai-proxy-cloudflare
 
-Бесплатный прокси для использования Google Gemini в [OpenCode](https://opencode.ai) и любых других OpenAI-совместимых клиентах. Cloudflare Worker конвертирует OpenAI API формат (`/v1/chat/completions`) в Gemini API формат и обратно.
+Бесплатные прокси для использования Google Gemini и GitHub Copilot в [OpenCode](https://opencode.ai) и любых других OpenAI-совместимых клиентах через Cloudflare Workers.
+
+---
+
+## Прокси
+
+| Прокси | Провайдер | Бесплатно | Лимит |
+|---|---|---|---|
+| Gemini | Google AI Studio | ✅ | 1500 запросов/день |
+| GitHub Copilot | GitHub | ✅ | 200 чатов/месяц |
 
 ---
 
@@ -9,12 +18,14 @@
 ```
 OpenCode / любой OpenAI-клиент
         ↓
-Cloudflare Worker (конвертер OpenAI ↔ Gemini)
+Cloudflare Worker
         ↓
-Google Gemini API (бесплатно)
+Google Gemini API  /  GitHub Copilot API
 ```
 
 ---
+
+# Прокси 1 — Google Gemini
 
 ## Шаг 1 — Получить Gemini API ключ
 
@@ -52,7 +63,7 @@ export default {
     }
 
     if (request.method !== 'POST') {
-      return new Response('Worker is running', { status: 200 });
+      return new Response('Gemini Proxy is running', { status: 200 });
     }
 
     const text = await request.text();
@@ -139,13 +150,6 @@ export default {
 - **Name:** `GEMINI_API_KEY`
 - **Value:** твой ключ из шага 1 (без кавычек)
 
-Нажми **Save**.
-
-Твой Worker будет доступен по адресу:
-```
-https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev
-```
-
 ---
 
 ## Шаг 3 — Подключить к OpenCode
@@ -153,8 +157,6 @@ https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev
 Открой или создай файл конфига:
 - **Windows:** `C:\Users\ИМЯ\.config\opencode\opencode.json`
 - **macOS/Linux:** `~/.config/opencode/opencode.json`
-
-Вставь:
 
 ```jsonc
 {
@@ -164,7 +166,7 @@ https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev
       "npm": "@ai-sdk/openai-compatible",
       "name": "Gemini via Cloudflare",
       "options": {
-        "baseURL": "https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev/v1",
+        "baseURL": "https://YOUR-WORKER.workers.dev/v1",
         "apiKey": "dummy"
       },
       "models": {
@@ -180,28 +182,12 @@ https://YOUR-WORKER-NAME.YOUR-SUBDOMAIN.workers.dev
 }
 ```
 
-Замени `YOUR-WORKER-NAME.YOUR-SUBDOMAIN` на свой URL из Cloudflare.
+## Проверка (PowerShell)
 
-Перезапусти OpenCode — провайдер появится в списке моделей.
-
----
-
-## Проверка работы
-
-**Windows PowerShell:**
 ```powershell
 $body = '{"model":"gemini-2.0-flash-lite","messages":[{"role":"user","content":"hello"}]}'
 Invoke-WebRequest -Uri "https://YOUR-WORKER.workers.dev/v1/chat/completions" -Method POST -ContentType "application/json" -Body $body -UseBasicParsing | Select-Object -ExpandProperty Content
 ```
-
-**Linux/macOS:**
-```bash
-curl -X POST https://YOUR-WORKER.workers.dev/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemini-2.0-flash-lite","messages":[{"role":"user","content":"hello"}]}'
-```
-
----
 
 ## Частые проблемы
 
@@ -209,12 +195,10 @@ curl -X POST https://YOUR-WORKER.workers.dev/v1/chat/completions \
 |---|---|---|
 | Пустой `content` в ответе | Ключ сохранён как JSON с кавычками | Пересохранить как **Secret** |
 | `429 RESOURCE_EXHAUSTED` | Исчерпан дневной лимит | Создать новый ключ или подождать до полночи UTC |
-| `SyntaxError: Unexpected end of JSON` | Worker получил GET вместо POST | Запрос идёт из браузера, а не из клиента |
+| `SyntaxError: Unexpected end of JSON` | Worker получил GET вместо POST | Запрос идёт из браузера |
 | Модель не появляется в OpenCode | Нет `/v1` в конце `baseURL` | Добавить `/v1` в конфиг |
 
----
-
-## Поддерживаемые модели
+## Поддерживаемые модели Gemini
 
 | Модель | Лимит (бесплатно) |
 |---|---|
@@ -224,9 +208,136 @@ curl -X POST https://YOUR-WORKER.workers.dev/v1/chat/completions \
 
 ---
 
+# Прокси 2 — GitHub Copilot
+
+## Почему нужен прокси?
+
+OpenCode по умолчанию использует `api.githubcopilot.com` (Business/Enterprise endpoint).
+Для **Individual/Free подписки** нужен `api.individual.githubcopilot.com` + специальные заголовки редактора.
+Worker решает обе проблемы автоматически.
+
+## Шаг 1 — Получить GitHub токен
+
+1. Убедись что у тебя активна подписка [GitHub Copilot Free](https://github.com/features/copilot/plans)
+2. Авторизуйся в OpenCode через `/connect` → GitHub Copilot
+3. Скопируй токен из `C:\Users\ИМЯ\.local\share\opencode\auth.json` (поле `access`, начинается с `gho_`)
+
+> ⚠️ Токен `gho_` периодически обновляется. При истечении нужно переавторизоваться и обновить секрет в Worker.
+
+## Шаг 2 — Создать Cloudflare Worker
+
+Создай новый Worker и вставь код:
+
+```js
+export default {
+  async fetch(request, env) {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+          'Access-Control-Allow-Headers': '*',
+        },
+      });
+    }
+
+    if (request.method !== 'POST') {
+      return new Response('GitHub Copilot Proxy is running', { status: 200 });
+    }
+
+    const text = await request.text();
+    if (!text) {
+      return new Response(JSON.stringify({ error: 'Empty body' }), { status: 400 });
+    }
+
+    const token = env.GITHUB_COPILOT_TOKEN;
+    const body = JSON.parse(text);
+
+    const copilotResponse = await fetch('https://api.individual.githubcopilot.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Editor-Version': 'vscode/1.85.0',
+        'Editor-Plugin-Version': 'copilot-chat/0.12.0',
+        'Copilot-Integration-Id': 'vscode-chat',
+        'User-Agent': 'GitHubCopilotChat/0.20.0',
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await copilotResponse.text();
+
+    return new Response(data, {
+      status: copilotResponse.status,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
+  },
+};
+```
+
+Добавь секрет:
+- **Type:** Secret
+- **Name:** `GITHUB_COPILOT_TOKEN`
+- **Value:** твой `gho_` токен
+
+## Шаг 3 — Подключить к OpenCode
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "github-copilot": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "GitHub Copilot",
+      "options": {
+        "baseURL": "https://YOUR-WORKER.workers.dev/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "gpt-4o": {
+          "name": "GitHub Copilot (GPT-4o)"
+        }
+      }
+    }
+  }
+}
+```
+
+## Проверка (PowerShell)
+
+```powershell
+$body = '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
+Invoke-WebRequest -Uri "https://YOUR-WORKER.workers.dev/v1/chat/completions" -Method POST -ContentType "application/json" -Body $body -UseBasicParsing | Select-Object -ExpandProperty Content
+```
+
+## Доступные модели GitHub Copilot (Free план)
+
+| Модель | Описание |
+|---|---|
+| `gpt-4o` | GPT-4o от OpenAI |
+| `gpt-4o-mini` | Лёгкая версия GPT-4o |
+| `gpt-4.1` | GPT-4.1 от OpenAI |
+| `claude-haiku-4.5` | Claude Haiku от Anthropic |
+| `gpt-5-mini` | GPT-5 mini от OpenAI |
+
+## Частые проблемы
+
+| Ошибка | Причина | Решение |
+|---|---|---|
+| `forbidden: access denied` | Неправильный endpoint | Убедись что используешь Worker, а не прямой URL |
+| `model_not_supported` | Модель недоступна на Free плане | Использовать модели из таблицы выше |
+| `bad request: Authorization header` | Неправильный формат токена | Токен должен быть `gho_`, не `ghp_` |
+| Токен перестал работать | `gho_` токен истёк | Переавторизоваться в OpenCode и обновить секрет |
+
+---
+
 ## Совместимость
 
-Прокси работает с любым OpenAI-совместимым клиентом:
+Оба прокси работают с любым OpenAI-совместимым клиентом:
 - [OpenCode](https://opencode.ai)
 - [Cursor](https://cursor.sh)
 - [Continue](https://continue.dev)
