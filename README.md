@@ -47,7 +47,6 @@ Google Gemini API  /  GitHub Copilot API
 **Workers & Pages → Create → Create Worker** → дай имя → **Deploy**.
 
 ### 2.3 Вставить код
-После деплоя нажми **Edit code**, замени всё содержимое:
 
 ```js
 export default {
@@ -66,83 +65,123 @@ export default {
       return new Response('Gemini Proxy is running', { status: 200 });
     }
 
-    const text = await request.text();
-    if (!text) {
-      return new Response(JSON.stringify({ error: 'Empty body' }), { status: 400 });
-    }
+    try {
+      if (!env.GEMINI_API_KEY) {
+        return new Response(JSON.stringify({
+          error: { message: 'GEMINI_API_KEY secret is not set', type: 'configuration_error' }
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
 
-    const apiKey = env.GEMINI_API_KEY;
-    const body = JSON.parse(text);
-    const { model, messages, stream, max_tokens, temperature } = body;
-    const geminiModel = model || 'gemini-2.0-flash-lite';
+      const text = await request.text();
+      if (!text) {
+        return new Response(JSON.stringify({
+          error: { message: 'Request body is empty', type: 'invalid_request_error' }
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
 
-    const contents = messages
-      .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
-      }));
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return new Response(JSON.stringify({
+          error: { message: 'Invalid JSON in request body', type: 'invalid_request_error' }
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
 
-    const systemInstruction = messages.find(m => m.role === 'system');
+      const { model, messages, stream, max_tokens, temperature } = body;
 
-    const geminiBody = {
-      contents,
-      ...(systemInstruction && {
-        system_instruction: { parts: [{ text: systemInstruction.content }] },
-      }),
-      generationConfig: {
-        temperature: temperature ?? 0.7,
-        maxOutputTokens: max_tokens ?? 8192,
-      },
-    };
+      if (!messages || !Array.isArray(messages) || messages.length === 0) {
+        return new Response(JSON.stringify({
+          error: { message: 'messages field is required and must be a non-empty array', type: 'invalid_request_error' }
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
 
-    const endpoint = stream
-      ? `streamGenerateContent?alt=sse&key=${apiKey}`
-      : `generateContent?key=${apiKey}`;
+      const geminiModel = model || 'gemini-2.0-flash-lite';
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:${endpoint}`;
+      const contents = messages
+        .filter(m => m.role !== 'system')
+        .map(m => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
+        }));
 
-    const geminiResponse = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(geminiBody),
-    });
+      const systemInstruction = messages.find(m => m.role === 'system');
 
-    if (stream) {
-      return new Response(geminiResponse.body, {
+      const geminiBody = {
+        contents,
+        ...(systemInstruction && {
+          system_instruction: { parts: [{ text: systemInstruction.content }] },
+        }),
+        generationConfig: {
+          temperature: temperature ?? 0.7,
+          maxOutputTokens: max_tokens ?? 8192,
+        },
+      };
+
+      const endpoint = stream
+        ? `streamGenerateContent?alt=sse&key=${env.GEMINI_API_KEY}`
+        : `generateContent?key=${env.GEMINI_API_KEY}`;
+
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:${endpoint}`;
+
+      const geminiResponse = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(geminiBody),
+      });
+
+      if (stream) {
+        return new Response(geminiResponse.body, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+
+      const data = await geminiResponse.json();
+
+      if (!geminiResponse.ok || data.error) {
+        const errorMessage = data.error?.message || `Gemini API error: ${geminiResponse.status}`;
+        const errorCode = data.error?.code || geminiResponse.status;
+        return new Response(JSON.stringify({
+          error: { message: errorMessage, code: errorCode, type: 'gemini_api_error' }
+        }), {
+          status: geminiResponse.status,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+
+      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-gemini',
+        object: 'chat.completion',
+        model: geminiModel,
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: responseText },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      }), {
         headers: {
-          'Content-Type': 'text/event-stream',
+          'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*',
         },
       });
+
+    } catch (err) {
+      return new Response(JSON.stringify({
+        error: { message: `Internal proxy error: ${err.message}`, type: 'proxy_error' }
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      });
     }
-
-    const data = await geminiResponse.json();
-    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-
-    const openAIResponse = {
-      id: 'chatcmpl-gemini',
-      object: 'chat.completion',
-      model: geminiModel,
-      choices: [{
-        index: 0,
-        message: { role: 'assistant', content: responseText },
-        finish_reason: 'stop',
-      }],
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-    };
-
-    return new Response(JSON.stringify(openAIResponse), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
   },
 };
 ```
-
-Нажми **Save and Deploy**.
 
 ### 2.4 Добавить API ключ как Secret
 **Settings → Variables and Secrets → Add**:
@@ -193,9 +232,9 @@ Invoke-WebRequest -Uri "https://YOUR-WORKER.workers.dev/v1/chat/completions" -Me
 
 | Ошибка | Причина | Решение |
 |---|---|---|
+| `configuration_error` | Секрет `GEMINI_API_KEY` не задан | Добавить в Variables and Secrets |
 | Пустой `content` в ответе | Ключ сохранён как JSON с кавычками | Пересохранить как **Secret** |
 | `429 RESOURCE_EXHAUSTED` | Исчерпан дневной лимит | Создать новый ключ или подождать до полночи UTC |
-| `SyntaxError: Unexpected end of JSON` | Worker получил GET вместо POST | Запрос идёт из браузера |
 | Модель не появляется в OpenCode | Нет `/v1` в конце `baseURL` | Добавить `/v1` в конфиг |
 
 ## Поддерживаемые модели Gemini
@@ -214,15 +253,26 @@ Invoke-WebRequest -Uri "https://YOUR-WORKER.workers.dev/v1/chat/completions" -Me
 
 OpenCode по умолчанию использует `api.githubcopilot.com` (Business/Enterprise endpoint).
 Для **Individual/Free подписки** нужен `api.individual.githubcopilot.com` + специальные заголовки редактора.
-Worker решает обе проблемы автоматически.
+Worker решает обе проблемы автоматически и скрывает токен из конфига.
 
 ## Шаг 1 — Получить GitHub токен
 
 1. Убедись что у тебя активна подписка [GitHub Copilot Free](https://github.com/features/copilot/plans)
-2. Авторизуйся в OpenCode через `/connect` → GitHub Copilot
-3. Скопируй токен из `C:\Users\ИМЯ\.local\share\opencode\auth.json` (поле `access`, начинается с `gho_`)
+2. Авторизуйся в OpenCode Desktop через раздел **Auth** → GitHub Copilot
+3. Скопируй токен из файла:
+   - **Windows:** `C:\Users\ИМЯ\.local\share\opencode\auth.json`
+   - **macOS/Linux:** `~/.local/share/opencode/auth.json`
+
+Поле `access` — это твой токен (начинается с `gho_`).
 
 > ⚠️ Токен `gho_` периодически обновляется. При истечении нужно переавторизоваться и обновить секрет в Worker.
+
+Проверить план и доступные endpoint'ы можно через PowerShell:
+
+```powershell
+$token = "gho_ВАШ_ТОКЕН"
+Invoke-WebRequest -Uri "https://api.github.com/copilot_internal/user" -Headers @{"Authorization"="token $token"; "User-Agent"="GitHubCopilotChat/0.20.0"} -UseBasicParsing | Select-Object -ExpandProperty Content
+```
 
 ## Шаг 2 — Создать Cloudflare Worker
 
@@ -245,36 +295,92 @@ export default {
       return new Response('GitHub Copilot Proxy is running', { status: 200 });
     }
 
-    const text = await request.text();
-    if (!text) {
-      return new Response(JSON.stringify({ error: 'Empty body' }), { status: 400 });
+    try {
+      if (!env.GITHUB_COPILOT_TOKEN) {
+        return new Response(JSON.stringify({
+          error: { message: 'GITHUB_COPILOT_TOKEN secret is not set', type: 'configuration_error' }
+        }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      const text = await request.text();
+      if (!text) {
+        return new Response(JSON.stringify({
+          error: { message: 'Request body is empty', type: 'invalid_request_error' }
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return new Response(JSON.stringify({
+          error: { message: 'Invalid JSON in request body', type: 'invalid_request_error' }
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+        return new Response(JSON.stringify({
+          error: { message: 'messages field is required and must be a non-empty array', type: 'invalid_request_error' }
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      const copilotResponse = await fetch('https://api.individual.githubcopilot.com/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.GITHUB_COPILOT_TOKEN}`,
+          'Content-Type': 'application/json',
+          'Editor-Version': 'vscode/1.85.0',
+          'Editor-Plugin-Version': 'copilot-chat/0.12.0',
+          'Copilot-Integration-Id': 'vscode-chat',
+          'User-Agent': 'GitHubCopilotChat/0.20.0',
+        },
+        body: JSON.stringify(body),
+      });
+
+      const data = await copilotResponse.text();
+
+      if (copilotResponse.status === 401 || copilotResponse.status === 403) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'GitHub Copilot token is expired or invalid. Re-authorize in OpenCode and update GITHUB_COPILOT_TOKEN secret.',
+            type: 'authentication_error',
+            code: copilotResponse.status,
+          }
+        }), {
+          status: copilotResponse.status,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+
+      if (copilotResponse.status === 400) {
+        return new Response(JSON.stringify({
+          error: {
+            message: 'Model not supported or bad request. Check available models for your Copilot plan.',
+            type: 'invalid_request_error',
+            raw: data,
+          }
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+
+      return new Response(data, {
+        status: copilotResponse.status,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+
+    } catch (err) {
+      return new Response(JSON.stringify({
+        error: { message: `Internal proxy error: ${err.message}`, type: 'proxy_error' }
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      });
     }
-
-    const token = env.GITHUB_COPILOT_TOKEN;
-    const body = JSON.parse(text);
-
-    const copilotResponse = await fetch('https://api.individual.githubcopilot.com/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Editor-Version': 'vscode/1.85.0',
-        'Editor-Plugin-Version': 'copilot-chat/0.12.0',
-        'Copilot-Integration-Id': 'vscode-chat',
-        'User-Agent': 'GitHubCopilotChat/0.20.0',
-      },
-      body: JSON.stringify(body),
-    });
-
-    const data = await copilotResponse.text();
-
-    return new Response(data, {
-      status: copilotResponse.status,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-      },
-    });
   },
 };
 ```
@@ -328,10 +434,10 @@ Invoke-WebRequest -Uri "https://YOUR-WORKER.workers.dev/v1/chat/completions" -Me
 
 | Ошибка | Причина | Решение |
 |---|---|---|
-| `forbidden: access denied` | Неправильный endpoint | Убедись что используешь Worker, а не прямой URL |
-| `model_not_supported` | Модель недоступна на Free плане | Использовать модели из таблицы выше |
-| `bad request: Authorization header` | Неправильный формат токена | Токен должен быть `gho_`, не `ghp_` |
-| Токен перестал работать | `gho_` токен истёк | Переавторизоваться в OpenCode и обновить секрет |
+| `configuration_error` | Секрет `GITHUB_COPILOT_TOKEN` не задан | Добавить в Variables and Secrets |
+| `authentication_error` | Токен истёк | Переавторизоваться и обновить секрет |
+| `invalid_request_error` | Модель недоступна на Free плане | Использовать модели из таблицы выше |
+| `forbidden: access denied` | Неправильный endpoint | Убедись что используешь Worker |
 
 ---
 
